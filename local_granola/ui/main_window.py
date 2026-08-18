@@ -1,25 +1,38 @@
 from __future__ import annotations
 
 import queue
-import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from local_granola.audio import AudioCaptureService, CaptureMode, ChunkEvent, list_audio_devices
 from local_granola.config import APP_NAME, OUTPUT_DIR
+from local_granola.llm import ChunkIngestionService
+from local_granola.stt import LiveTranscriptionService, TranscriptArtifactsResult, TranscriptUpdate
 
 
 class MainWindow:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("860x620")
-        self.root.minsize(760, 520)
+        self.root.geometry("980x760")
+        self.root.minsize(860, 640)
 
         self.capture_service = AudioCaptureService(output_directory=OUTPUT_DIR)
         self.capture_service.add_listener(self._queue_event)
         self.events: queue.Queue[ChunkEvent] = queue.Queue()
+        self.ingestion = ChunkIngestionService()
+        self.ingestion.add_outline_listener(self._queue_outline)
+        self.ingestion.add_status_listener(self._queue_transcript_status)
+        self.transcription_service = LiveTranscriptionService(self.capture_service)
+        self.transcription_service.add_segment_listener(self._queue_transcript)
+        self.transcription_service.add_segment_listener(self.ingestion.handle_update)
+        self.transcription_service.add_status_listener(self._queue_transcript_status)
+        self.transcript_events: queue.Queue[TranscriptUpdate] = queue.Queue()
+        self.transcript_status_events: queue.Queue[str] = queue.Queue()
+        self.outline_events: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.preview_by_source: dict[str, str] = {}
+        self.committed_transcript_lines: list[str] = []
 
         self.mode_var = tk.StringVar(value=CaptureMode.BOTH.value)
         self.status_var = tk.StringVar(value="Ready to record")
@@ -29,6 +42,8 @@ class MainWindow:
         self.speaker_var = tk.StringVar(value="Loading…")
         self.loopback_var = tk.StringVar(value="Loading…")
         self.level_var = tk.StringVar(value="No audio yet")
+        self.transcript_status_var = tk.StringVar(value="Transcript idle")
+        self.preview_var = tk.StringVar(value="Preview will appear here as you speak.")
 
         self._build()
         self._refresh_devices()
@@ -44,7 +59,7 @@ class MainWindow:
         ttk.Label(header, text=APP_NAME, font=("Segoe UI", 20, "bold")).pack(anchor=tk.W)
         ttk.Label(
             header,
-            text="Prototype slice: capture microphone and speaker audio locally",
+            text="Live transcript + topic outline from local nomic + Qwen",
             foreground="#555555",
         ).pack(anchor=tk.W, pady=(4, 0))
 
@@ -93,12 +108,33 @@ class MainWindow:
             row=2, column=1, sticky=tk.W, padx=(12, 0), pady=(8, 0)
         )
 
-        live = ttk.LabelFrame(root_frame, text="Live capture events", padding=12)
+        transcript_frame = ttk.LabelFrame(root_frame, text="Live transcript", padding=12)
+        transcript_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+
+        ttk.Label(transcript_frame, textvariable=self.transcript_status_var).pack(anchor=tk.W)
+        ttk.Label(
+            transcript_frame,
+            textvariable=self.preview_var,
+            wraplength=760,
+            foreground="#555555",
+        ).pack(anchor=tk.W, pady=(6, 6))
+
+        self.transcript_box = tk.Text(transcript_frame, height=12, wrap=tk.WORD)
+        self.transcript_box.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.transcript_box.configure(state=tk.DISABLED)
+
+        outline_frame = ttk.LabelFrame(root_frame, text="Live topic outline", padding=12)
+        outline_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        self.outline_box = tk.Text(outline_frame, height=10, wrap=tk.WORD)
+        self.outline_box.pack(fill=tk.BOTH, expand=True)
+        self.outline_box.configure(state=tk.DISABLED)
+
+        live = ttk.LabelFrame(root_frame, text="Capture diagnostics", padding=12)
         live.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(live, textvariable=self.level_var).pack(anchor=tk.W)
 
-        self.log = tk.Text(live, height=18, wrap=tk.WORD)
+        self.log = tk.Text(live, height=8, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.log.configure(state=tk.DISABLED)
 
@@ -114,11 +150,18 @@ class MainWindow:
         try:
             mode = CaptureMode(self.mode_var.get())
             self.capture_service.start(mode)
+            self.ingestion.start()
+            self.transcription_service.start()
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Could not start recording:\n\n{exc}")
             return
 
         self.status_var.set("● Recording")
+        self.transcript_status_var.set("Starting live transcript…")
+        self._clear_transcript()
+        self.committed_transcript_lines = []
+        self.preview_by_source = {}
+        self.preview_var.set("Preview will appear here as you speak.")
         self._append_log(f"Started recording from {mode.value}.")
 
     def _stop_recording(self) -> None:
@@ -132,6 +175,19 @@ class MainWindow:
             messagebox.showerror(APP_NAME, f"Could not stop recording cleanly:\n\n{exc}")
             return
 
+        try:
+            transcript_artifacts = self.transcription_service.stop(capture_result=result)
+        except Exception as exc:
+            transcript_artifacts = None
+            self._append_log(f"Transcript finalization failed: {exc}")
+            self.transcript_status_var.set(f"Transcript finalization failed: {exc}")
+
+        try:
+            outline = self.ingestion.stop()
+            self._set_outline(outline)
+        except Exception as exc:
+            self._append_log(f"Summary tree flush failed: {exc}")
+
         self.status_var.set("Capture saved")
         self.timer_var.set("00:00")
 
@@ -139,12 +195,27 @@ class MainWindow:
             result.microphone_wav,
             result.speaker_wav,
             result.mixed_wav,
+            result.timeline_path,
             result.metadata_path,
         ]
+        if transcript_artifacts is not None:
+            files.extend(
+                [
+                    transcript_artifacts.transcript_json_path,
+                    transcript_artifacts.transcript_text_path,
+                    transcript_artifacts.chunks_json_path,
+                    transcript_artifacts.chunks_text_path,
+                ]
+            )
+            files.extend(transcript_artifacts.source_json_paths.values())
+            files.extend(transcript_artifacts.source_text_paths.values())
         visible_files = "\n".join(str(path) for path in files if path is not None)
         self._append_log(
             f"Stopped recording after {result.duration_seconds:.1f}s.\nSaved:\n{visible_files}"
         )
+        self.preview_by_source = {}
+        self.preview_var.set("Preview cleared.")
+        self._render_transcript_box()
 
     def _refresh_devices(self) -> None:
         try:
@@ -166,8 +237,19 @@ class MainWindow:
     def _queue_event(self, event: ChunkEvent) -> None:
         self.events.put(event)
 
+    def _queue_transcript(self, update: TranscriptUpdate) -> None:
+        self.transcript_events.put(update)
+
+    def _queue_transcript_status(self, status: str) -> None:
+        self.transcript_status_events.put(status)
+
+    def _queue_outline(self, outline: str, reason: str) -> None:
+        self.outline_events.put((outline, reason))
+
     def _schedule_ui_refresh(self) -> None:
         self._drain_events()
+        self._drain_transcript_events()
+        self._drain_outline_events()
         self._refresh_timer()
         self.root.after(200, self._schedule_ui_refresh)
 
@@ -189,6 +271,43 @@ class MainWindow:
             )
             processed += 1
 
+    def _drain_transcript_events(self) -> None:
+        processed = 0
+        while processed < 25:
+            try:
+                status = self.transcript_status_events.get_nowait()
+            except queue.Empty:
+                break
+            self.transcript_status_var.set(status)
+            processed += 1
+
+        processed = 0
+        while processed < 25:
+            try:
+                update = self.transcript_events.get_nowait()
+            except queue.Empty:
+                break
+
+            self._append_transcript_segment(update)
+            processed += 1
+
+    def _drain_outline_events(self) -> None:
+        latest = None
+        while True:
+            try:
+                latest = self.outline_events.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            self._set_outline(latest[0])
+
+    def _set_outline(self, text: str) -> None:
+        self.outline_box.configure(state=tk.NORMAL)
+        self.outline_box.delete("1.0", tk.END)
+        self.outline_box.insert(tk.END, text.rstrip() + "\n")
+        self.outline_box.see(tk.END)
+        self.outline_box.configure(state=tk.DISABLED)
+
     def _refresh_timer(self) -> None:
         if not self.capture_service.is_recording:
             return
@@ -203,12 +322,87 @@ class MainWindow:
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
 
+    def _append_transcript_segment(self, update: TranscriptUpdate) -> None:
+        segment = update.segment
+        if update.is_preview:
+            if segment.text.strip():
+                self.preview_by_source[segment.source] = segment.to_text_line()
+            else:
+                self.preview_by_source.pop(segment.source, None)
+
+            if self.preview_by_source:
+                ordered_sources = ["microphone", "speakers"]
+                lines = [
+                    self.preview_by_source[source]
+                    for source in ordered_sources
+                    if source in self.preview_by_source
+                ]
+                self.preview_var.set("Live preview " + " | ".join(lines))
+            else:
+                self.preview_var.set("Preview will appear here as you speak.")
+            self._render_transcript_box()
+            return
+
+        line = f"{segment.to_text_line()}\n"
+        self.committed_transcript_lines.append(line.rstrip("\n"))
+        self._render_transcript_box()
+
+    def _clear_transcript(self) -> None:
+        self.committed_transcript_lines = []
+        self.transcript_box.configure(state=tk.NORMAL)
+        self.transcript_box.delete("1.0", tk.END)
+        self.transcript_box.configure(state=tk.DISABLED)
+
+    def _render_transcript_box(self) -> None:
+        lines = list(self.committed_transcript_lines)
+
+        preview_lines = []
+        ordered_sources = ["microphone", "speakers"]
+        for source in ordered_sources:
+            if source not in self.preview_by_source:
+                continue
+            preview_lines.append(f"{self.preview_by_source[source]}  [live]")
+
+        if preview_lines:
+            if lines:
+                lines.append("")
+            lines.extend(preview_lines)
+
+        body = "\n".join(lines)
+        if body:
+            body += "\n"
+
+        self.transcript_box.configure(state=tk.NORMAL)
+        self.transcript_box.delete("1.0", tk.END)
+        self.transcript_box.insert(tk.END, body)
+        self.transcript_box.see(tk.END)
+        self.transcript_box.configure(state=tk.DISABLED)
+
 
 def run() -> None:
+    import os
+    import sys
+    import traceback
+    from app_paths import app_dir
+    from local_models import runtime_problems
+
+    os.chdir(app_dir())
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (app_dir() / "models").mkdir(parents=True, exist_ok=True)
+
     root = tk.Tk()
     style = ttk.Style(root)
     if "vista" in style.theme_names():
         style.theme_use("vista")
-    MainWindow(root)
-    root.mainloop()
+
+    try:
+        problems = runtime_problems()
+        if problems:
+            messagebox.showwarning(APP_NAME, "\n\n".join(problems))
+        MainWindow(root)
+        root.mainloop()
+    except Exception:
+        text = traceback.format_exc()
+        (app_dir() / "granola.log").write_text(text, encoding="utf-8")
+        messagebox.showerror(APP_NAME, f"The app crashed.\nDetails saved to granola.log\n\n{text[-800:]}")
+        raise

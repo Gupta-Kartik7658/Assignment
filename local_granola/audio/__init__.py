@@ -1,4 +1,4 @@
-from .capture import AudioCaptureService, CaptureMode, CaptureResult, ChunkEvent
+from .capture import AudioCaptureService, CaptureMode, CaptureResult, ChunkEvent, RecordedChunk
 from .devices import AudioDeviceSnapshot, list_audio_devices
 
 __all__ = [
@@ -7,5 +7,6 @@ __all__ = [
     "CaptureMode",
     "CaptureResult",
     "ChunkEvent",
+    "RecordedChunk",
     "list_audio_devices",
 ]
