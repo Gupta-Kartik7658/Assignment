@@ -1,0 +1,2 @@
+FROM D:/assesment/Assignment/models/nomic-embed-text-v1.5.f16.gguf
+PARAMETER temperature 0.2
