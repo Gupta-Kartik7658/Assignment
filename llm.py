@@ -4,7 +4,7 @@ Quantized Qwen from models/qwen2.5-1.5b-instruct-q4_k_m.gguf (via local Ollama).
 
 import requests
 
-from local_models import OLLAMA, QWEN_NAME, ensure_models
+from local_models import OLLAMA, QWEN_NAME, ensure_qwen
 
 llm_call_count = 0
 
@@ -12,7 +12,7 @@ llm_call_count = 0
 def qwen_call(prompt: str, max_tokens: int = 120) -> str:
     global llm_call_count
     llm_call_count += 1
-    ensure_models()
+    ensure_qwen()
     r = requests.post(
         f"{OLLAMA}/api/generate",
         json={

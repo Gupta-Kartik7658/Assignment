@@ -4,7 +4,7 @@ Print cosine similarities from nomic-embed-text so we can pick thresholds.
 We already know which chunks are SAME / SUB / NEW (from the demo transcript).
 The script just measures what the embedder thinks, it does not place nodes.
 
-Needs Ollama running with nomic-embed-text.
+Needs Ollama running. Uses models/nomic-embed-text-v1.5.f16.gguf.
 
 Run:  .venv\\Scripts\\python calibrate.py
 """

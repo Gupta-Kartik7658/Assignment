@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
-from embedder import HIGH, cosine
+from embedder import HIGH, LOW, cosine
 
 MAX_DEPTH = 4
 DEBOUNCE = 2  # need this many "not the same topic" votes in a row before Qwen
@@ -74,22 +74,29 @@ class Tree:
         self.word_threshold = word_threshold
         self.time_threshold = time_threshold
         self.offline = offline
+        if offline:
+            self.use_embed = False
+            self.use_qwen = False
+        else:
+            self.use_embed = True
+            from local_models import qwen_ready
+
+            self.use_qwen = qwen_ready()
         self.root = SummaryNode(title="session", depth=0, status="active")
         self.active = self.root
-        self.recent = []
         self.away_votes = 0
         self.last_reason = "start"
 
-        if offline:
-            self._embed = dummy_embed
-        else:
+        if self.use_embed:
             from embedder import embed as real_embed
 
             self._embed = real_embed
+        else:
+            self._embed = dummy_embed
 
     def _qwen(self, prompt: str, max_tokens: int = 120) -> str:
         global llm_call_count
-        if self.offline:
+        if not self.use_qwen:
             return fake_qwen(prompt, max_tokens)
         from llm import qwen_call
 
@@ -117,7 +124,7 @@ class Tree:
         if hint is not None:
             raise ValueError(f"unknown hint: {hint}")
 
-        if self.offline:
+        if not self.use_embed:
             self.last_reason = "offline-active"
             return self.active
 
@@ -151,8 +158,9 @@ class Tree:
             return self.active
 
         self.away_votes = 0
-        decision = self._verify(chunk)
-        self.last_reason = f"qwen-{decision} ({best_score:.2f})"
+        decision = self._verify(chunk, best_score)
+        tag = "qwen" if self.use_qwen else "embed-guess"
+        self.last_reason = f"{tag}-{decision} ({best_score:.2f})"
         if decision == "SAME":
             return self.active
         if decision == "SUB":
@@ -177,7 +185,10 @@ class Tree:
             out.append(n)
         return out
 
-    def _verify(self, chunk: str) -> str:
+    def _verify(self, chunk: str, best_score: float) -> str:
+        if not self.use_qwen:
+            # nomic only: don't invent SUB without Qwen
+            return "NEW" if best_score < LOW else "SAME"
         parent = self.active.parent or self.root
         siblings = [c.title for c in parent.children if c is not self.active]
         sibling_txt = ", ".join(siblings) if siblings else "(none)"
@@ -212,10 +223,7 @@ class Tree:
     # ------------------------------------------------------------ per chunk
 
     def insert_chunk(self, chunk: str, hint=None) -> SummaryNode:
-        self.recent.append(chunk)
-        self.recent = self.recent[-3:]
-        window = " ".join(self.recent)
-        chunk_embedding = self._embed(window)
+        chunk_embedding = self._embed(chunk)
 
         node = self.decide_placement(chunk_embedding, chunk, hint=hint)
 
@@ -224,7 +232,7 @@ class Tree:
 
         node.raw_chunks.append(chunk)
         self._set_active(node)
-        if not self.offline:
+        if self.use_embed:
             node.embedding = self._embed(node.topic_text())
 
         self.maybe_update_node_summary(node)
@@ -254,7 +262,7 @@ class Tree:
         node.summary = self._qwen(prompt, max_tokens=80)
         node.raw_chunks.clear()
         node.updated_at = time.time()
-        if not self.offline:
+        if self.use_embed:
             node.embedding = self._embed(node.summary)
 
         node.dirty = True

@@ -23,12 +23,18 @@ FAKE_TRANSCRIPT = [
 
 
 def main():
-    print("loading GGUFs from models/ ...")
-    from local_models import ensure_models
+    print("loading nomic from models/ ...")
+    from local_models import ensure_embedder, qwen_ready
 
-    ensure_models()
+    ensure_embedder()
+    has_qwen = qwen_ready()
+    print("qwen ready:", has_qwen)
 
-    tree = Tree(word_threshold=20, time_threshold=9999, offline=False)
+    tree = Tree(
+        word_threshold=20 if has_qwen else 9999,
+        time_threshold=9999,
+        offline=False,
+    )
 
     for i, chunk in enumerate(FAKE_TRANSCRIPT, 1):
         node = tree.insert_chunk(chunk)

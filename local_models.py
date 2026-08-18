@@ -56,10 +56,18 @@ def _create(name: str, gguf: Path) -> None:
     )
 
 
-def ensure_models() -> None:
+def ensure_embedder() -> None:
     _create(NOMIC_NAME, NOMIC_GGUF)
+
+
+def qwen_ready() -> bool:
+    return QWEN_GGUF.exists() and QWEN_GGUF.stat().st_size > 10_000_000 and _is_gguf(QWEN_GGUF)
+
+
+def ensure_qwen() -> None:
     _create(QWEN_NAME, QWEN_GGUF)
 
 
-def ensure_embedder() -> None:
-    _create(NOMIC_NAME, NOMIC_GGUF)
+def ensure_models() -> None:
+    ensure_embedder()
+    ensure_qwen()

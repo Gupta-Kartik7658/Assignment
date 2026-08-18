@@ -6,8 +6,8 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from local_granola.audio import AudioCaptureService, CaptureMode, ChunkEvent, list_audio_devices
-from local_granola.meeting import format_timestamp
 from local_granola.config import APP_NAME, OUTPUT_DIR
+from local_granola.llm import ChunkIngestionService
 from local_granola.stt import LiveTranscriptionService, TranscriptArtifactsResult, TranscriptUpdate
 
 
@@ -15,17 +15,22 @@ class MainWindow:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("860x620")
-        self.root.minsize(760, 520)
+        self.root.geometry("980x760")
+        self.root.minsize(860, 640)
 
         self.capture_service = AudioCaptureService(output_directory=OUTPUT_DIR)
         self.capture_service.add_listener(self._queue_event)
         self.events: queue.Queue[ChunkEvent] = queue.Queue()
+        self.ingestion = ChunkIngestionService()
+        self.ingestion.add_outline_listener(self._queue_outline)
+        self.ingestion.add_status_listener(self._queue_transcript_status)
         self.transcription_service = LiveTranscriptionService(self.capture_service)
         self.transcription_service.add_segment_listener(self._queue_transcript)
+        self.transcription_service.add_segment_listener(self.ingestion.handle_update)
         self.transcription_service.add_status_listener(self._queue_transcript_status)
         self.transcript_events: queue.Queue[TranscriptUpdate] = queue.Queue()
         self.transcript_status_events: queue.Queue[str] = queue.Queue()
+        self.outline_events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.preview_by_source: dict[str, str] = {}
         self.committed_transcript_lines: list[str] = []
 
@@ -54,7 +59,7 @@ class MainWindow:
         ttk.Label(header, text=APP_NAME, font=("Segoe UI", 20, "bold")).pack(anchor=tk.W)
         ttk.Label(
             header,
-            text="Prototype slice: capture microphone and speaker audio locally",
+            text="Live transcript + topic outline from local nomic + Qwen",
             foreground="#555555",
         ).pack(anchor=tk.W, pady=(4, 0))
 
@@ -118,6 +123,12 @@ class MainWindow:
         self.transcript_box.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.transcript_box.configure(state=tk.DISABLED)
 
+        outline_frame = ttk.LabelFrame(root_frame, text="Live topic outline", padding=12)
+        outline_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        self.outline_box = tk.Text(outline_frame, height=10, wrap=tk.WORD)
+        self.outline_box.pack(fill=tk.BOTH, expand=True)
+        self.outline_box.configure(state=tk.DISABLED)
+
         live = ttk.LabelFrame(root_frame, text="Capture diagnostics", padding=12)
         live.pack(fill=tk.BOTH, expand=True)
 
@@ -139,6 +150,7 @@ class MainWindow:
         try:
             mode = CaptureMode(self.mode_var.get())
             self.capture_service.start(mode)
+            self.ingestion.start()
             self.transcription_service.start()
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Could not start recording:\n\n{exc}")
@@ -147,6 +159,7 @@ class MainWindow:
         self.status_var.set("● Recording")
         self.transcript_status_var.set("Starting live transcript…")
         self._clear_transcript()
+        self._set_outline("(waiting for speech)")
         self.committed_transcript_lines = []
         self.preview_by_source = {}
         self.preview_var.set("Preview will appear here as you speak.")
@@ -169,6 +182,12 @@ class MainWindow:
             transcript_artifacts = None
             self._append_log(f"Transcript finalization failed: {exc}")
             self.transcript_status_var.set(f"Transcript finalization failed: {exc}")
+
+        try:
+            outline = self.ingestion.stop()
+            self._set_outline(outline)
+        except Exception as exc:
+            self._append_log(f"Summary tree flush failed: {exc}")
 
         self.status_var.set("Capture saved")
         self.timer_var.set("00:00")
@@ -225,9 +244,13 @@ class MainWindow:
     def _queue_transcript_status(self, status: str) -> None:
         self.transcript_status_events.put(status)
 
+    def _queue_outline(self, outline: str, reason: str) -> None:
+        self.outline_events.put((outline, reason))
+
     def _schedule_ui_refresh(self) -> None:
         self._drain_events()
         self._drain_transcript_events()
+        self._drain_outline_events()
         self._refresh_timer()
         self.root.after(200, self._schedule_ui_refresh)
 
@@ -268,6 +291,23 @@ class MainWindow:
 
             self._append_transcript_segment(update)
             processed += 1
+
+    def _drain_outline_events(self) -> None:
+        latest = None
+        while True:
+            try:
+                latest = self.outline_events.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            self._set_outline(latest[0])
+
+    def _set_outline(self, text: str) -> None:
+        self.outline_box.configure(state=tk.NORMAL)
+        self.outline_box.delete("1.0", tk.END)
+        self.outline_box.insert(tk.END, text.rstrip() + "\n")
+        self.outline_box.see(tk.END)
+        self.outline_box.configure(state=tk.DISABLED)
 
     def _refresh_timer(self) -> None:
         if not self.capture_service.is_recording:
