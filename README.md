@@ -1,53 +1,47 @@
 # Local Granola
 
-Live meeting capture with a topic tree instead of one flat summary.
-Everything runs locally: Whisper STT, nomic embeddings, quantized Qwen.
+Local meeting app: live transcript + a **topic tree** (not one flat summary).
+No cloud. Ollama must be running.
 
 ## Run
 
-Ollama must be running. Weights stay in `models/`.
-
 ```powershell
-.venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python test_tree.py
-.venv\Scripts\python main.py
-.venv\Scripts\python app.py
+.venv\Scripts\activate
+pip install -r requirements.txt
+python app.py
 ```
 
-- `test_tree.py` — offline tree checks (no models)
-- `main.py` — fake transcript through nomic + Qwen
-- `app.py` — live UI: mic/speaker capture → Whisper → summary tree
+`python main.py` — fake transcript, no mic. `python test_tree.py` — tree logic only.
 
-## Local models
+## Models (`models/`)
 
-Put these in `models/` (already wired):
+| file | used for |
+|---|---|
+| `nomic-embed-text-v1.5.f16.gguf` | is this the same topic? |
+| `qwen2.5-1.5b-instruct-q4_k_m.gguf` | SAME/SUB/NEW + node summaries |
+| faster-whisper `tiny.en` snapshot | speech → text |
 
-- `nomic-embed-text-v1.5.f16.gguf` — topic embeddings
-- `qwen2.5-1.5b-instruct-q4_k_m.gguf` — summaries + SAME/SUB/NEW check
-
-Whisper models also live under `models/` (faster-whisper snapshots).
-
-## Live path
-
-1. `AudioCaptureService` captures mic and/or speakers.
-2. `LiveTranscriptionService` emits `TranscriptUpdate` events.
-3. Preview text (`is_preview=True`) is UI-only.
-4. Stable segments go to `ChunkIngestionService`, which batches ~18 words
-   then calls `Tree.insert_chunk`.
-5. Nomic places the chunk. If it looks like a new topic, Qwen answers
-   SAME / SUB / NEW. Node summaries fire only when that node's buffer is full.
-6. The UI outline panel shows the tree. On Stop, buffers flush and ancestors roll up.
-
-## Output
-
-Each recording writes `output/capture_<timestamp>/`:
+## End to end
 
 ```
-microphone.wav, speakers.wav, mixed.wav
-transcript.json, transcript.txt, chunks.json, chunks.txt
+mic / speakers
+    → Whisper (tiny.en)          live transcript
+    → stable segments only       previews stay in the UI
+    → nomic embedding            stick to current node, or flag a split
+    → Qwen (only if unsure)      SAME / SUB / NEW  (max depth 4)
+    → Qwen (per node, lazy)      that node's summary, not the whole tree
+    → UI "Live topic outline"
 ```
 
-## Binary later
+On **Stop**: leftover buffers flush, ancestors roll up once, files land in `output/capture_<timestamp>/`.
 
-Pack the Python app, keep `models/` next to the exe. First run registers the
-two GGUFs with local Ollama as `nomic-local` and `qwen-local`. No cloud, no keys.
+LLM budget: 0–1 Qwen calls per chunk (placement or that node's summary). Rollups are not per-chunk.
+
+## Layout
+
+- `app.py` — UI
+- `summary_tree.py` — topic tree
+- `embedder.py` / `llm.py` / `local_models.py` — nomic + Qwen via Ollama
+- `local_granola/stt/` — live Whisper
+- `local_granola/llm/chunk_ingestion.py` — STT → tree
+- `local_granola/audio/` — capture
