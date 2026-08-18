@@ -3,11 +3,14 @@ GGUFs live in models/. Ollama only runs them; it does not fetch anything.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 
 import requests
 
-ROOT = Path(__file__).resolve().parent
+from app_paths import app_dir
+
+ROOT = app_dir()
 MODELS = ROOT / "models"
 OLLAMA = "http://localhost:11434"
 
@@ -48,11 +51,13 @@ def _create(name: str, gguf: Path) -> None:
         f"FROM {path}\nPARAMETER temperature 0.2\n{extra}",
         encoding="utf-8",
     )
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     print(f"registering {gguf.name} as {name} (one-time, from models/)...")
     subprocess.run(
         ["ollama", "create", name, "-f", str(modelfile)],
         check=True,
         cwd=str(ROOT),
+        creationflags=flags,
     )
 
 
@@ -68,6 +73,43 @@ def ensure_qwen() -> None:
     _create(QWEN_NAME, QWEN_GGUF)
 
 
-def ensure_models() -> None:
-    ensure_embedder()
-    ensure_qwen()
+def ollama_up() -> bool:
+    try:
+        requests.get(f"{OLLAMA}/api/tags", timeout=3).raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+def try_start_ollama() -> bool:
+    if ollama_up():
+        return True
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        subprocess.Popen(
+            ["ollama", "serve"],
+            creationflags=flags,
+            cwd=str(ROOT),
+        )
+    except Exception:
+        return False
+    for _ in range(20):
+        if ollama_up():
+            return True
+        import time
+
+        time.sleep(0.5)
+    return ollama_up()
+
+
+def runtime_problems() -> list[str]:
+    problems = []
+    if not try_start_ollama():
+        problems.append(
+            "Ollama is not running. Install Ollama and start it, then open this app again."
+        )
+    if not NOMIC_GGUF.exists():
+        problems.append(f"Missing embedder:\n{NOMIC_GGUF}")
+    if not qwen_ready():
+        problems.append(f"Missing or invalid Qwen GGUF:\n{QWEN_GGUF}")
+    return problems

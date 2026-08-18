@@ -2,18 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app_paths import app_dir
+
 
 APP_NAME = "Local Granola"
 SAMPLE_RATE = 16_000
 CHUNK_FRAMES = 2_048
 BLOCKSIZE = 2_048
 DEFAULT_CHUNK_WINDOW_SECONDS = 60.0
-OUTPUT_DIR = Path("output")
-MODELS_DIR = Path("models")
+OUTPUT_DIR = app_dir() / "output"
+MODELS_DIR = app_dir() / "models"
 WHISPER_DOWNLOAD_ROOT = MODELS_DIR
 WHISPER_LOCAL_MODEL_DIR = MODELS_DIR / "whisper"
-WHISPER_MODEL_CANDIDATES = ("small.en", "base.en", "tiny.en", "tiny")
-WHISPER_MODEL_NAME = "small.en"
+WHISPER_MODEL_CANDIDATES = ("tiny.en", "base.en", "small.en", "tiny")
+WHISPER_MODEL_NAME = "tiny.en"
 WHISPER_MODEL_REPO_DIR = MODELS_DIR / f"models--Systran--faster-whisper-{WHISPER_MODEL_NAME}"
 WHISPER_LANGUAGE = "en"
 WHISPER_DEVICE = "cpu"

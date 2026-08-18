@@ -159,7 +159,6 @@ class MainWindow:
         self.status_var.set("● Recording")
         self.transcript_status_var.set("Starting live transcript…")
         self._clear_transcript()
-        self._set_outline("(waiting for speech)")
         self.committed_transcript_lines = []
         self.preview_by_source = {}
         self.preview_var.set("Preview will appear here as you speak.")
@@ -381,10 +380,29 @@ class MainWindow:
 
 
 def run() -> None:
+    import os
+    import sys
+    import traceback
+    from app_paths import app_dir
+    from local_models import runtime_problems
+
+    os.chdir(app_dir())
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (app_dir() / "models").mkdir(parents=True, exist_ok=True)
+
     root = tk.Tk()
     style = ttk.Style(root)
     if "vista" in style.theme_names():
         style.theme_use("vista")
-    MainWindow(root)
-    root.mainloop()
+
+    try:
+        problems = runtime_problems()
+        if problems:
+            messagebox.showwarning(APP_NAME, "\n\n".join(problems))
+        MainWindow(root)
+        root.mainloop()
+    except Exception:
+        text = traceback.format_exc()
+        (app_dir() / "granola.log").write_text(text, encoding="utf-8")
+        messagebox.showerror(APP_NAME, f"The app crashed.\nDetails saved to granola.log\n\n{text[-800:]}")
+        raise

@@ -82,6 +82,7 @@ def _stt_worker_main(
             device=WHISPER_DEVICE,
             compute_type=WHISPER_COMPUTE_TYPE,
             download_root=str(WHISPER_DOWNLOAD_ROOT),
+            local_files_only=True,
         )
     except Exception as exc:  # pragma: no cover - model/runtime dependent
         result_queue.put({"type": "error", "source": source, "error": str(exc)})
@@ -401,6 +402,7 @@ class LiveTranscriptionService:
             device=WHISPER_DEVICE,
             compute_type=WHISPER_COMPUTE_TYPE,
             download_root=str(WHISPER_DOWNLOAD_ROOT),
+            local_files_only=True,
         )
 
         source_documents: dict[str, TranscriptDocument] = {}
@@ -543,7 +545,10 @@ class LiveTranscriptionService:
                     if _is_complete_model_dir(snapshot):
                         return str(snapshot), model_name
 
-        return WHISPER_MODEL_NAME, WHISPER_MODEL_NAME
+        raise FileNotFoundError(
+            "No complete local Whisper model found in models/. "
+            "tiny.en should already be there. Do not download small.en."
+        )
 
 
 def _accept_source_candidate(
